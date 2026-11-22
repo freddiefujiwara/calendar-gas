@@ -7,19 +7,21 @@ import * as Code from '../src/Code.js';
 let props;
 let calendars;
 
-function makeEvent({ title = 'Event', start, end, allDay = false, status = 'YES' }) {
+function makeEvent({ id = 'dummy-id', title = 'Event', start, end, allDay = false, status = 'YES', location = '' }) {
   return {
+    getId: () => id,
     getTitle: () => title,
     getStartTime: () => new Date(start),
     getEndTime: () => new Date(end),
     isAllDayEvent: () => allDay,
     getMyStatus: () => status,
+    getLocation: () => location,
   };
 }
 
 global.ContentService = {
   createTextOutput: vi.fn((text) => ({ text, setMimeType: vi.fn() })),
-  MimeType: { JSON: 'application/json' },
+  MimeType: { JSON: 'application/json', XML: 'text/xml' },
 };
 
 global.PropertiesService = {
@@ -45,12 +47,19 @@ function callGet(params) {
   return JSON.parse(calls[calls.length - 1][0]);
 }
 
+function callGetRaw(params) {
+  Code.doGet({ parameter: params });
+  const calls = global.ContentService.createTextOutput.mock.calls;
+  return calls[calls.length - 1][0];
+}
+
 const DAY = '2026-11-24';
 const at = (hhmm) => `${DAY}T${hhmm}:00+09:00`;
 
 beforeEach(() => {
   props = {
     API_TOKEN: 'test-token',
+    RSS_TOKEN: 'test-rss-token',
     MAIN_CALENDAR_ID: 'dummy-main@example.com',
     FAMILY_CALENDAR_ID: 'dummy-family@example.com',
     EXCLUDE_WORDS: 'NGWORD',
@@ -152,5 +161,81 @@ describe('evening summary', () => {
     const res = callGet({ token: 'test-token', date: DAY });
     expect(res.hasNightPlan).toBe(false);
     expect(res.lastWorkEventEnd).toBe(new Date(at('19:00')).toISOString());
+  });
+});
+
+describe('schedule RSS', () => {
+  // Utilities.formatDate is mocked, so "today" is always 2026-11-24
+  // in these tests; the feed window is 2026-11-24 .. 2026-12-01 (JST).
+  const rss = (token = 'test-rss-token') => callGetRaw({ action: 'rss', token });
+
+  it('refuses when RSS_TOKEN is unset or the token mismatches', () => {
+    delete props.RSS_TOKEN;
+    expect(callGet({ action: 'rss', token: 'test-rss-token' }).ok).toBe(false);
+    props.RSS_TOKEN = 'test-rss-token';
+    expect(callGet({ action: 'rss', token: 'test-token' }).ok).toBe(false);
+    expect(callGet({ action: 'rss' }).ok).toBe(false);
+  });
+
+  it('returns an RSS 2.0 document with both calendars\u2019 events', () => {
+    calendars['dummy-main@example.com'] = {
+      getEvents: () => [makeEvent({ id: 'm1', title: 'Meeting', start: at('10:00'), end: at('11:00') })],
+    };
+    calendars['dummy-family@example.com'] = {
+      getEvents: () => [makeEvent({ id: 'f1', title: 'Family dinner', start: at('19:00'), end: at('20:00') })],
+    };
+    const xml = rss();
+    expect(xml).toContain('<rss version="2.0">');
+    expect(xml).toContain('<title>Meeting</title>');
+    expect(xml).toContain('<title>Family dinner</title>');
+    // Newest first.
+    expect(xml.indexOf('Family dinner')).toBeLessThan(xml.indexOf('Meeting'));
+    // JST label and source in the description.
+    expect(xml).toContain('11月24日（火） 10:00–11:00 / main');
+    expect(xml).toContain('11月24日（火） 19:00–20:00 / family');
+    // pubDate is the start instant in RFC 822 form; guid pairs id + start.
+    expect(xml).toContain('<pubDate>' + new Date(at('10:00')).toUTCString() + '</pubDate>');
+    expect(xml).toContain('m1@' + new Date(at('10:00')).toISOString());
+  });
+
+  it('does not apply EXCLUDE_WORDS to the family calendar', () => {
+    calendars['dummy-family@example.com'] = {
+      getEvents: () => [makeEvent({ title: 'NGWORD event', start: at('19:00'), end: at('20:00') })],
+    };
+    expect(rss()).toContain('<title>NGWORD event</title>');
+  });
+
+  it('drops declined events but keeps all-day ones', () => {
+    calendars['dummy-main@example.com'] = {
+      getEvents: () => [
+        makeEvent({ title: 'Declined', start: at('19:00'), end: at('20:00'), status: 'NO' }),
+        makeEvent({ title: 'Holiday', start: at('00:00'), end: '2026-11-25T00:00:00+09:00', allDay: true }),
+      ],
+    };
+    const xml = rss();
+    expect(xml).not.toContain('Declined');
+    expect(xml).toContain('<title>Holiday</title>');
+    expect(xml).toContain('11月24日（火） 終日 / main');
+  });
+
+  it('covers today through 7 days ahead, not beyond', () => {
+    calendars['dummy-main@example.com'] = {
+      getEvents: () => [
+        makeEvent({ title: 'Day7', start: '2026-12-01T10:00:00+09:00', end: '2026-12-01T11:00:00+09:00' }),
+        makeEvent({ title: 'Day8', start: '2026-12-02T10:00:00+09:00', end: '2026-12-02T11:00:00+09:00' }),
+      ],
+    };
+    const xml = rss();
+    expect(xml).toContain('<title>Day7</title>');
+    expect(xml).not.toContain('Day8');
+  });
+
+  it('escapes XML in titles and locations', () => {
+    calendars['dummy-main@example.com'] = {
+      getEvents: () => [makeEvent({ title: 'A & B <test>', start: at('10:00'), end: at('11:00'), location: 'Room "1"' })],
+    };
+    const xml = rss();
+    expect(xml).toContain('<title>A &amp; B &lt;test&gt;</title>');
+    expect(xml).toContain('@ Room &quot;1&quot;');
   });
 });
