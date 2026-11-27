@@ -7,7 +7,7 @@ import * as Code from '../src/Code.js';
 let props;
 let calendars;
 
-function makeEvent({ id = 'dummy-id', title = 'Event', start, end, allDay = false, status = 'YES', location = '' }) {
+function makeEvent({ id = 'dummy-id', title = 'Event', start, end, allDay = false, status = 'YES', location = '', description = '' }) {
   return {
     getId: () => id,
     getTitle: () => title,
@@ -16,6 +16,7 @@ function makeEvent({ id = 'dummy-id', title = 'Event', start, end, allDay = fals
     isAllDayEvent: () => allDay,
     getMyStatus: () => status,
     getLocation: () => location,
+    getDescription: () => description,
   };
 }
 
@@ -237,5 +238,43 @@ describe('schedule RSS', () => {
     const xml = rss();
     expect(xml).toContain('<title>A &amp; B &lt;test&gt;</title>');
     expect(xml).toContain('@ Room &quot;1&quot;');
+  });
+
+  it('includes the event description after the date/time line', () => {
+    calendars['dummy-main@example.com'] = {
+      getEvents: () => [makeEvent({
+        title: 'Trip',
+        start: at('10:00'),
+        end: at('11:00'),
+        description: 'Line 1: take the train\nLine 2: exit 3 & walk',
+      })],
+    };
+    const xml = rss();
+    expect(xml).toContain(
+      '11月24日（火） 10:00–11:00 / main\nLine 1: take the train\nLine 2: exit 3 &amp; walk'
+    );
+  });
+
+  it('reduces an HTML description to plain text', () => {
+    calendars['dummy-main@example.com'] = {
+      getEvents: () => [makeEvent({
+        title: 'Trip',
+        start: at('10:00'),
+        end: at('11:00'),
+        description: '<p>First</p><p>Second<br>Third</p>',
+      })],
+    };
+    const xml = rss();
+    expect(xml).toContain('/ main\nFirst\nSecond\nThird');
+    expect(xml).not.toContain('&lt;p&gt;');
+  });
+
+  it('keeps events whose description cannot be read', () => {
+    const ev = makeEvent({ title: 'No description API', start: at('10:00'), end: at('11:00') });
+    delete ev.getDescription;
+    calendars['dummy-main@example.com'] = { getEvents: () => [ev] };
+    const xml = rss();
+    expect(xml).toContain('<title>No description API</title>');
+    expect(xml).toContain('11月24日（火） 10:00–11:00 / main');
   });
 });
